@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>手势控制粒子 - 像素骨架版</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000; /* 纯黑背景 */
+        }
+
+        /* 视频元素完全隐藏，只用于数据源 */
+        #input_video {
+            display: none;
+        }
+
+        /* 背景画布：显示黑白像素点 */
+        #bgCanvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 0; /* 最底层 */
+            transform: scaleX(-1); /* 镜像翻转 */
+        }
+
+        /* 前景画布：显示骨架和彩色粒子 */
+        #particleCanvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1; /* 上层 */
+        }
+
+        /* 加载提示样式优化 */
+        #loading-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10;
+            text-align: center;
+            width: 80%;
+            pointer-events: none;
+        }
+
+        #loading-text {
+            color: #ffffff;
+            font-family: 'Courier New', Courier, monospace; /* 像素风格字体 */
+            font-size: 1.2em;
+            text-shadow: 2px 2px 0px #000;
+            margin-bottom: 20px;
+        }
+
+        #error-message {
+            color: #ff4d4d;
+            font-family: sans-serif;
+            font-size: 1em;
+            background: rgba(0,0,0,0.8);
+            padding: 10px;
+            border-radius: 5px;
+            display: none; /* 默认隐藏 */
+        }
+    </style>
+</head>
+<body>
+
+<div id="loading-container">
+    <div id="loading-text">SYSTEM INITIALIZING...<br>正在接入神经影像...</div>
+    <div id="error-message"></div>
+</div>
+
+<video id="input_video" playsinline webkit-playsinline></video>
+<canvas id="bgCanvas"></canvas>
+<canvas id="particleCanvas"></canvas>
+
+<script>
+    // ==========================================
+    // 0. 环境检查与全局变量
+    // ==========================================
+    const loadingText = document.getElementById('loading-text');
+    const errorMsg = document.getElementById('error-message');
+    const videoElement = document.getElementById('input_video');
+    
+    // 检查 HTTPS (本地开发除外)
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        showError("严重错误：必须使用 HTTPS 协议才能在移动设备上访问摄像头。");
+        throw new Error("HTTPS Required");
+    }
+
+    let isModelLoaded = false;
+    let mouse = { x: null, y: null, radius: 250 };
+    // 用于存储最新的手部数据供 Canvas 使用
+    let latestLandmarks = null; 
+
+    // ==========================================
+    // 1. Canvas 设置 (双 Canvas 架构)
+    // ==========================================
+    const pCanvas = document.getElementById('particleCanvas');
+    const pCtx = pCanvas.getContext('2d');
+    const bgCanvas = document.getElementById('bgCanvas');
+    const bgCtx = bgCanvas.getContext('2d');
+    
+    // 用于像素化计算的小画布 (离屏)
+    const smallCanvas = document.createElement('canvas');
+    const smallCtx = smallCanvas.getContext('2d');
+    // 像素化程度：数字越大点越大。建议 60-100 之间
+    const pixelationFactor = 80; 
+
+    let w, h;
+
+    function resizeCanvas() {
+        w = window.innerWidth;
+        h = window.innerHeight;
+        pCanvas.width = w;
+        pCanvas.height = h;
+        bgCanvas.width = w;
+        bgCanvas.height = h;
+        // 设置小画布尺寸，用于降采样
+        smallCanvas.width = Math.ceil(w / (h/pixelationFactor));
+        smallCanvas.height = pixelationFactor;
+
+        if (particlesArray.length === 0) initParticles();
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+
+    // ==========================================
+    // 2. MediaPipe 手势识别核心
+    // ==========================================
+    function onResults(results) {
+        // 模型加载成功的标志
+        if (!isModelLoaded && results.multiHandLandmarks) {
+            document.getElementById('loading-container').style.display = 'none';
+            isModelLoaded = true;
+            // 模型加载完成后，启动动画循环
+            animate();
+        }
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            // 保存这一帧的数据供后续绘制使用
+            latestLandmarks = results.multiHandLandmarks[0];
+            const indexFingerTip = latestLandmarks[8];
+            // 映射交互点坐标 (注意这里不再需要镜像计算，因为 Canvas 整体已经镜像了)
+            mouse.x = indexFingerTip.x * w;
+            mouse.y = indexFingerTip.y * h;
+        } else {
+            latestLandmarks = null;
+            // 手移开后，将交互点移出屏幕外，避免残留斥力
+            mouse.x = -1000; mouse.y = -1000;
+        }
+    }
+
+    const hands = new Hands({locateFile: (file) => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1, // 移动端如果卡顿可以改为 0
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    // 简化的摄像头启动逻辑，不强制分辨率，提高兼容性
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          // 确保视频正在播放且有数据才发送
+          if (videoElement.readyState >= 2) {
+              await hands.send({image: videoElement});
+          }
+        },
+        // 移除强制的 width/height 设置，让浏览器自己决定
+        // width: 640, height: 480 
+    });
+
+    function showError(msg) {
+        loadingText.style.display = 'none';
+        errorMsg.innerText = msg;
+        errorMsg.style.display = 'block';
+    }
+
+    camera.start().catch(err => {
+        console.error("Camera Error:", err);
+        let msg = "无法启动摄像头。";
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            msg = "访问被拒绝。请在浏览器设置中允许摄像头权限并刷新页面。";
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            msg = "未检测到摄像头设备。";
+        } else {
+            msg += " 错误详情: " + err.name;
+        }
+        showError(msg);
+    });
+
+
+    // ==========================================
+    // 3. 粒子系统定义
+    // ==========================================
+    let particlesArray = [];
+    const config = {
+        particleCount: 120, // 稍微减少一点数量保证性能
+        connectionDistance: 150,
+        baseSpeed: 0.5,
+        mouseRepelForce: 12
+    };
+
+    class Particle {
+        constructor() {
+            this.x = Math.random() * w;
+            this.y = Math.random() * h;
+            this.size = Math.random() * 5 + 3; 
+            this.speedX = Math.random() * config.baseSpeed * 2 - config.baseSpeed;
+            this.speedY = Math.random() * config.baseSpeed * 2 - config.baseSpeed;
+            this.density = (Math.random() * 30) + 1;
+            this.hue = Math.random() * 360;
+            this.color = 'hsl(' + this.hue + ', 100%, 60%)';
+        }
+
+        update() {
+            this.x += this.speedX;
+            this.y += this.speedY;
+            if (this.x > w || this.x < 0) this.speedX = -this.speedX;
+            if (this.y > h || this.y < 0) this.speedY = -this.speedY;
+
+            // 斥力交互
+            let dx = mouse.x - this.x;
+            let dy = mouse.y - this.y;
+            let distance = Math.sqrt(dx * dx + dy * dy);
+            if (distance < mouse.radius) {
+                let forceDirectionX = dx / distance;
+                let forceDirectionY = dy / distance;
+                let force = (mouse.radius - distance) / mouse.radius; 
+                let directionX = forceDirectionX * force * this.density * config.mouseRepelForce / 100;
+                let directionY = forceDirectionY * force * this.density * config.mouseRepelForce / 100;
+                this.x += directionX;
+                this.y += directionY;
+            }
+        }
+
+        draw() {
+            pCtx.beginPath();
+            pCtx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            pCtx.closePath();
+            pCtx.fillStyle = this.color;
+            pCtx.fill();
+        }
+    }
+
+    function initParticles() {
+        particlesArray = [];
+        for (let i = 0; i < config.particleCount; i++) {
+            particlesArray.push(new Particle());
+        }
+    }
+
+    function connectParticles() {
+        let opacityValue = 1;
+        for (let a = 0; a < particlesArray.length; a++) {
+            for (let b = a; b < particlesArray.length; b++) {
+                let dx = particlesArray[a].x - particlesArray[b].x;
+                let dy = particlesArray[a].y - particlesArray[b].y;
+                let distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance < config.connectionDistance) {
+                    opacityValue = 1 - (distance / config.connectionDistance);
+                    pCtx.strokeStyle = 'hsla(' + particlesArray[a].hue + ', 100%, 60%,' + opacityValue + ')';
+                    pCtx.lineWidth = 2;
+                    pCtx.beginPath();
+                    pCtx.moveTo(particlesArray[a].x, particlesArray[a].y);
+                    pCtx.lineTo(particlesArray[b].x, particlesArray[b].y);
+                    pCtx.stroke();
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // 4. 背景渲染：高对比度黑白像素点
+    // ==========================================
+    function drawBackgroundDots() {
+        // 1. 将视频帧绘制到非常小的离屏 canvas 上进行降采样
+        smallCtx.drawImage(videoElement, 0, 0, smallCanvas.width, smallCanvas.height);
+        
+        // 2. 获取像素数据
+        const frameData = smallCtx.getImageData(0, 0, smallCanvas.width, smallCanvas.height);
+        const data = frameData.data;
+        
+        // 3. 清除背景画布 (填充黑色)
+        bgCtx.fillStyle = 'black';
+        bgCtx.fillRect(0, 0, w, h);
+
+        // 4. 计算栅格大小
+        const cellWidth = w / smallCanvas.width;
+        const cellHeight = h / smallCanvas.height;
+
+        bgCtx.fillStyle = 'white';
+
+        // 5. 遍历像素数据
+        for (let y = 0; y < smallCanvas.height; y++) {
+            for (let x = 0; x < smallCanvas.width; x++) {
+                const index = (y * smallCanvas.width + x) * 4;
+                const r = data[index];
+                const g = data[index + 1];
+                const b = data[index + 2];
+                // 计算简易亮度
+                const brightness = (r + g + b) / 3;
+
+                // 高对比度阈值：只有亮度大于 100 的才画点
+                if (brightness > 100) {
+                    const posX = x * cellWidth;
+                    const posY = y * cellHeight;
+                    // 画一个方形点，大小根据亮度微调，但保持像素感
+                    const dotSize = cellWidth * (brightness / 255) * 0.8;
+                    bgCtx.fillRect(posX + (cellWidth - dotSize)/2, posY + (cellHeight - dotSize)/2, dotSize, dotSize);
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // 5. 主动画循环
+    // ==========================================
+    function animate() {
+        // A. 绘制背景层 (像素点)
+        if (videoElement.readyState >= 2) {
+             drawBackgroundDots();
+        }
+
+        // B. 绘制前景层 (清除旧帧)
+        pCtx.clearRect(0, 0, w, h);
+
+        // C. 如果有手部数据，绘制骨架 (MediaPipe 内置绘图工具)
+        if (latestLandmarks) {
+            // 绘制连接线 (骨骼)
+            drawConnectors(pCtx, latestLandmarks, HAND_CONNECTIONS, 
+                           {color: '#FFFFFF', lineWidth: 3});
+            // 绘制关键点 (关节)
+            drawLandmarks(pCtx, latestLandmarks, 
+                          {color: '#FF0000', lineWidth: 2, radius: 5});
+        }
+
+        // D. 绘制彩色粒子系统
+        for (let i = 0; i < particlesArray.length; i++) {
+            particlesArray[i].update();
+            particlesArray[i].draw();
+        }
+        connectParticles();
+
+        requestAnimationFrame(animate);
+    }
+
+    // 启动
+    resizeCanvas();
+    initParticles();
+    // 注意：animate() 现在会在模型加载完成后在 onResults 里被调用
+    // 这样可以防止在视频准备好之前就开始尝试读取像素数据
+
+</script>
+</body>
+</html>
