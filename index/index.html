@@ -3,44 +3,52 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>双手势控制烟花粒子 - 绽放与聚合</title>
+    <title>双手势控制烟花 - 修正版</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
         body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
+            margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+            background-color: #000; touch-action: none;
         }
         #input_video { display: none; }
-        /* 背景像素层 */
         #bgCanvas {
             display: block; position: absolute; top: 0; left: 0; z-index: 0;
-            transform: scaleX(-1); /* 镜像 */
+            transform: scaleX(-1);
         }
-        /* 前景粒子和骨架层 */
         #particleCanvas {
             display: block; position: absolute; top: 0; left: 0; z-index: 1;
         }
         #loading-container {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            z-index: 10; text-align: center; width: 80%; pointer-events: none;
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); z-index: 999;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            background: rgba(40, 40, 40, 0.8); padding: 30px; border-radius: 16px;
+            backdrop-filter: blur(8px); box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1); transition: opacity 0.5s ease;
         }
+        .spinner {
+            width: 40px; height: 40px; border: 4px solid rgba(255, 255, 255, 0.2);
+            border-radius: 50%; border-top-color: #00E5FF;
+            animation: spin 0.8s cubic-bezier(0.4, 0.0, 0.2, 1) infinite; margin-bottom: 20px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
         #loading-text {
-            color: #ffffff; font-family: 'Courier New', monospace;
-            font-size: 1.2em; text-shadow: 2px 2px 0px #000;
+            color: #fff; font-family: 'Segoe UI', sans-serif;
+            font-size: 1.1em; font-weight: 500; letter-spacing: 0.5px;
         }
+        #loading-status { font-size: 0.85em; color: #aaa; margin-top: 8px; }
     </style>
 </head>
 <body>
 
 <div id="loading-container">
-    <div id="loading-text">SYSTEM INITIALIZING...<br>正在加载双手势识别模型...</div>
+    <div class="spinner"></div>
+    <div id="loading-text">正在启动神经接口...</div>
+    <div id="loading-status">首次加载可能需要几十秒，请允许摄像头权限。</div>
 </div>
 
 <video id="input_video" playsinline webkit-playsinline></video>
@@ -48,57 +56,22 @@
 <canvas id="particleCanvas"></canvas>
 
 <script>
-  
-    // resizeCanvas();
-    // initParticles();
-
-    // ==========================================
-    // 新增：注册 Service Worker 进行缓存
-    // ==========================================
-    // 检查浏览器是否支持 Service Worker，并且必须在 HTTPS 或 localhost 下运行
-    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('./sw.js')
-                .then((registration) => {
-                    console.log('Service Worker 注册成功，范围:', registration.scope);
-                    // 可以在这里提示用户“已准备好离线访问”
-                })
-                .catch((err) => {
-                    console.log('Service Worker 注册失败:', err);
-                });
-        });
-    } else {
-        console.log('当前环境不支持 Service Worker，将无法使用缓存加速。请确保使用 HTTPS。');
-    }
-
-</script>
-</body>
-</html>
-
-<script>
-    // ==========================================
-    // 0. 全局设置
-    // ==========================================
     const videoElement = document.getElementById('input_video');
     const loadingContainer = document.getElementById('loading-container');
+    const loadingStatus = document.getElementById('loading-status');
     let isModelLoaded = false;
-
     const pCanvas = document.getElementById('particleCanvas');
     const pCtx = pCanvas.getContext('2d');
     const bgCanvas = document.getElementById('bgCanvas');
     const bgCtx = bgCanvas.getContext('2d');
     const smallCanvas = document.createElement('canvas');
     const smallCtx = smallCanvas.getContext('2d');
-    const pixelationFactor = 60; // 背景像素化程度
-
+    const pixelationFactor = 60;
     let w, h;
-    // 【核心变化1】存储多只手的交互状态数组
-    // 每个元素结构: { x: number, y: number, isAttracting: boolean }
-    let handInteractions = []; 
+    let handInteractions = [];
 
     function resizeCanvas() {
-        w = window.innerWidth;
-        h = window.innerHeight;
+        w = window.innerWidth; h = window.innerHeight;
         pCanvas.width = w; pCanvas.height = h;
         bgCanvas.width = w; bgCanvas.height = h;
         smallCanvas.width = Math.ceil(w / (h/pixelationFactor));
@@ -107,94 +80,60 @@
     }
     window.addEventListener('resize', resizeCanvas);
 
-    // ==========================================
-    // 1. MediaPipe 手势识别与逻辑核心
-    // ==========================================
-
-    // 【核心变化2】手势判断辅助函数
-    // 判断是握拳(True)还是张开(False)
-    // 原理：计算指尖(如中指尖12)到手掌基部(0)的距离。距离短则为握拳。
     function isHandClosed(landmarks) {
-        const wrist = landmarks[0];
-        const middleFingerTip = landmarks[12];
-        // 计算归一化坐标下的平方距离 (避免开方，性能更好)
-        const dx = wrist.x - middleFingerTip.x;
-        const dy = wrist.y - middleFingerTip.y;
+        const wrist = landmarks[0]; const middleFingerTip = landmarks[12];
+        const dx = wrist.x - middleFingerTip.x; const dy = wrist.y - middleFingerTip.y;
         const distanceSq = dx*dx + dy*dy;
-        // 阈值经验值：约 0.15 的平方是 0.0225。小于此值认为是握拳。
-        return distanceSq < 0.03; 
+        return distanceSq < 0.032;
     }
 
     function onResults(results) {
         if (!isModelLoaded && results.multiHandLandmarks) {
-            loadingContainer.style.display = 'none';
+            console.log("AI Model Initialized & Ready.");
+            loadingContainer.style.opacity = '0';
+            setTimeout(() => { loadingContainer.style.display = 'none'; }, 500);
             isModelLoaded = true;
             animate();
         }
-
-        // 清空上一帧的交互数据
         handInteractions = [];
-
-        // 绘制背景像素
         if (videoElement.readyState >= 2) drawBackgroundDots();
-        // 清空前景画布
         pCtx.clearRect(0, 0, w, h);
-
         if (results.multiHandLandmarks) {
-            // 遍历检测到的每一只手
             for (const landmarks of results.multiHandLandmarks) {
-                // A. 绘制骨架附着在手上
-                drawConnectors(pCtx, landmarks, HAND_CONNECTIONS, {color: '#FFFFFF', lineWidth: 2});
-                drawLandmarks(pCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
-
-                // B. 计算交互中心点（使用掌心点 9，比指尖更稳定）
+                drawConnectors(pCtx, landmarks, HAND_CONNECTIONS, {color: 'rgba(255,255,255,0.8)', lineWidth: 2});
+                drawLandmarks(pCtx, landmarks, {color: 'rgba(255,50,50,0.8)', lineWidth: 1, radius: 3});
                 const palmCenter = landmarks[9];
-                const interactionX = palmCenter.x * w;
-                const interactionY = palmCenter.y * h;
-
-                // C. 判断手势状态（握拳=聚合=吸引，张开=绽放=排斥）
-                // isHandClosed 返回 true (握拳) -> isAttracting 为 true
-                const attractingStr = isHandClosed(landmarks);
-
-                // D. 将这只手的数据存入数组
                 handInteractions.push({
-                    x: interactionX,
-                    y: interactionY,
-                    isAttracting: attractingStr
+                    x: palmCenter.x * w, y: palmCenter.y * h, isAttracting: isHandClosed(landmarks)
                 });
             }
         }
-
-        // 更新和绘制粒子（放在这里确保在骨架之上或之下绘制，看需求）
         updateAndDrawParticles();
     }
 
     const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
     hands.setOptions({
-        maxNumHands: 2, // 【重要】允许追踪两只手
-        modelComplexity: 1,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
+        maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5
     });
     hands.onResults(onResults);
 
+    loadingStatus.innerText = "正在请求摄像头权限，请允许...";
     const camera = new Camera(videoElement, {
-        onFrame: async () => { if (videoElement.readyState >= 2) await hands.send({image: videoElement}); },
-        // width: 640, height: 480 // 让浏览器自动选择
+        onFrame: async () => { 
+            if (videoElement.readyState >= 2) {
+                if (!isModelLoaded) loadingStatus.innerText = "AI 模型正在初始化，即将完成...";
+                await hands.send({image: videoElement}); 
+            }
+        },
     });
-    camera.start().catch(e => { loadingContainer.innerHTML = "摄像头启动失败，请检查HTTPS和权限。<br>" + e; });
+    camera.start().catch(e => { 
+        loadingContainer.innerHTML = "<h4 style='color: #ff6b6b; margin-bottom:10px;'>启动失败</h4><p style='color:#ccc; font-size:0.9em;'>无法访问摄像头。<br>请确保在 HTTPS 环境下运行并已授予权限。</p>";
+        console.error("Camera Error:", e);
+    });
 
-
-    // ==========================================
-    // 2. 粒子系统 (支持多重引力/斥力)
-    // ==========================================
     let particlesArray = [];
     const config = {
-        particleCount: 130,
-        connectionDistance: 140,
-        baseSpeed: 0.6,
-        interactionRadius: 280, // 交互影响半径
-        forceStrength: 18       // 力度大小
+        particleCount: 130, connectionDistance: 140, baseSpeed: 0.6, interactionRadius: 280, forceStrength: 20
     };
 
     class Particle {
@@ -205,33 +144,22 @@
             this.speedY = Math.random() * config.baseSpeed * 2 - config.baseSpeed;
             this.density = (Math.random() * 30) + 1;
             this.hue = Math.random() * 360;
-            this.color = `hsl(${this.hue}, 100%, 60%)`;
+            this.color = `hsl(${this.hue}, 100%, 65%)`;
         }
-
         update() {
-            // 基础移动
             this.x += this.speedX; this.y += this.speedY;
-            // 边界反弹
-            if (this.x > w || this.x < 0) this.speedX = *= -1;
+            // 【已修正】删除了多余的等号
+            if (this.x > w || this.x < 0) this.speedX *= -1;
             if (this.y > h || this.y < 0) this.speedY *= -1;
 
-            // 【核心变化3】遍历所有活跃的手进行交互
             for (const hand of handInteractions) {
-                let dx = hand.x - this.x;
-                let dy = hand.y - this.y;
+                let dx = hand.x - this.x; let dy = hand.y - this.y;
                 let distance = Math.sqrt(dx * dx + dy * dy);
-
                 if (distance < config.interactionRadius) {
-                    let forceDirectionX = dx / distance;
-                    let forceDirectionY = dy / distance;
+                    let forceDirectionX = dx / distance; let forceDirectionY = dy / distance;
                     let forceRatio = (config.interactionRadius - distance) / config.interactionRadius;
                     let forceValue = forceRatio * this.density * config.forceStrength / 100;
-
-                    // 【核心变化4】根据手势决定力的方向
-                    // 如果是吸引(握拳)，方向指向手心 (+1)
-                    // 如果是排斥(张开)，方向远离手心 (-1)
                     let directionMultiplier = hand.isAttracting ? 1 : -1;
-
                     this.x += forceDirectionX * forceValue * directionMultiplier;
                     this.y += forceDirectionY * forceValue * directionMultiplier;
                 }
@@ -247,67 +175,60 @@
         particlesArray = [];
         for (let i = 0; i < config.particleCount; i++) particlesArray.push(new Particle());
     }
-
     function updateAndDrawParticles() {
         for (let i = 0; i < particlesArray.length; i++) {
-            particlesArray[i].update();
-            particlesArray[i].draw();
+            particlesArray[i].update(); particlesArray[i].draw();
         }
-        // 连接线逻辑 (保持不变，省略以节省篇幅，效果相同)
         connectParticles(); 
     }
-
     function connectParticles() {
         let opacityValue = 1;
         for (let a = 0; a < particlesArray.length; a++) {
             for (let b = a; b < particlesArray.length; b++) {
-                let dx = particlesArray[a].x - particlesArray[b].x;
-                let dy = particlesArray[a].y - particlesArray[b].y;
+                let dx = particlesArray[a].x - particlesArray[b].x; let dy = particlesArray[a].y - particlesArray[b].y;
                 let distance = Math.sqrt(dx * dx + dy * dy);
                 if (distance < config.connectionDistance) {
                     opacityValue = 1 - (distance / config.connectionDistance);
                     pCtx.strokeStyle = `hsla(${particlesArray[a].hue}, 100%, 60%, ${opacityValue})`;
                     pCtx.lineWidth = 2;
-                    pCtx.beginPath();
-                    pCtx.moveTo(particlesArray[a].x, particlesArray[a].y);
-                    pCtx.lineTo(particlesArray[b].x, particlesArray[b].y);
-                    pCtx.stroke();
+                    pCtx.beginPath(); pCtx.moveTo(particlesArray[a].x, particlesArray[a].y); pCtx.lineTo(particlesArray[b].x, particlesArray[b].y); pCtx.stroke();
                 }
             }
         }
     }
 
-    // ==========================================
-    // 3. 背景像素化渲染 (保持上一个版本逻辑)
-    // ==========================================
     function drawBackgroundDots() {
         smallCtx.drawImage(videoElement, 0, 0, smallCanvas.width, smallCanvas.height);
         const frameData = smallCtx.getImageData(0, 0, smallCanvas.width, smallCanvas.height);
         const data = frameData.data;
-        bgCtx.fillStyle = 'black'; bgCtx.fillRect(0, 0, w, h);
-        const cellWidth = w / smallCanvas.width;
-        const cellHeight = h / smallCanvas.height;
-        bgCtx.fillStyle = '#333'; // 稍微调亮一点背景点
+        bgCtx.fillStyle = '#000000'; bgCtx.fillRect(0, 0, w, h);
+        const cellWidth = w / smallCanvas.width; const cellHeight = h / smallCanvas.height;
+        bgCtx.fillStyle = '#444';
         for (let y = 0; y < smallCanvas.height; y++) {
             for (let x = 0; x < smallCanvas.width; x++) {
                 const index = (y * smallCanvas.width + x) * 4;
                 const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
-                if (brightness > 80) {
-                    const dotSize = cellWidth * (brightness / 255) * 0.9;
+                if (brightness > 70) {
+                    const dotSize = cellWidth * (brightness / 255) * 0.85;
                     bgCtx.fillRect(x * cellWidth + (cellWidth - dotSize)/2, y * cellHeight + (cellHeight - dotSize)/2, dotSize, dotSize);
                 }
             }
         }
     }
+    function animate() {}
 
-    function animate() {
-        // 动画循环现在由 onResults 驱动，不需要在这里 requestAnimationFrame
-        // 这样能保证视频帧和绘制帧同步
+    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./sw.js')
+                .then((registration) => { console.log('[SW] 注册成功:', registration.scope); })
+                .catch((err) => { console.warn('[SW] 注册失败:', err); });
+        });
+    } else {
+        console.log('[SW] 当前环境不支持 Service Worker，无法使用缓存加速。');
     }
 
     resizeCanvas();
     initParticles();
-
 </script>
 </body>
 </html>
