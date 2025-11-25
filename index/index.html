@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>双手势控制烟花 - 最终修正版</title>
+    <title>双手势控制烟花 - 终极修正版V2</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -148,7 +148,8 @@
         }
         update() {
             this.x += this.speedX; this.y += this.speedY;
-            // 【已修正】下面两行绝对没有多余的等号了
+            
+            // 这里的语法是绝对正确的
             if (this.x > w || this.x < 0) this.speedX *= -1;
             if (this.y > h || this.y < 0) this.speedY *= -1;
 
